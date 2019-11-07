@@ -845,7 +845,7 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
     public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
       WebResourceResponse response = null;
       if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
-        response = RNCWebViewManager.this.shouldInterceptRequest(request, true, (RNCWebView) view);
+        response = RNCWebViewManager.this.shouldInterceptRequest(request, false, (RNCWebView) view);
         if (response != null) {
           return response;
         }
