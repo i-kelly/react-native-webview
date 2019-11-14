@@ -16,6 +16,7 @@ import android.os.Environment;
 import androidx.annotation.RequiresApi;
 import androidx.core.content.ContextCompat;
 import android.text.TextUtils;
+import android.util.Log;
 import android.view.Gravity;
 import android.view.View;
 import android.view.ViewGroup;
@@ -78,17 +79,25 @@ import java.net.URL;
 import java.net.URLEncoder;
 import java.nio.charset.Charset;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
+import java.util.Iterator;
+import java.util.List;
 import java.util.Locale;
 import java.util.Map;
+import java.util.Set;
+import java.util.logging.Logger;
 
 import javax.annotation.Nullable;
 
+import okhttp3.Headers;
 import okhttp3.MediaType;
 import okhttp3.OkHttpClient;
 import okhttp3.Request;
 import okhttp3.Response;
 import okhttp3.OkHttpClient.Builder;
+import okhttp3.internal.http.HttpMethod;
+
 import static okhttp3.internal.Util.UTF_8;
 
 /**
@@ -175,10 +184,18 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
   }
 
   public static Boolean urlStringLooksInvalid(String urlString) {
-    return urlString == null ||
+    Boolean invalid =  urlString == null ||
       urlString.trim().equals("") ||
       !(urlString.startsWith("http") && !urlString.startsWith("www")) ||
-      urlString.contains("|");
+      urlString.contains("|") || urlString.endsWith(".js") || urlString.endsWith(".css") || urlString.endsWith(".ico");
+
+    if(!invalid && (urlString.contains(".js") || urlString.contains(".css") || urlString.contains(".ico"))) {
+      String[] parts = urlString.split("?");
+      if (parts[0].endsWith(".js") || parts[0].endsWith(".css") || parts[0].endsWith(".ico")) {
+        invalid = true;
+      }
+    }
+    return invalid;
   }
 
   public static Boolean responseRequiresJSInjection(Response response) {
@@ -199,8 +216,14 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
     if (RNCWebViewManager.urlStringLooksInvalid(urlStr)) {
       return null;
     }
-    try {
 
+
+    if(!request.getMethod().equalsIgnoreCase("GET")){
+      return null;
+    }
+
+
+    try {
 
       Request req = new Request.Builder()
         .header("User-Agent", mUserAgent)
@@ -213,16 +236,34 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
       InputStream is = response.body().byteStream();
       MediaType contentType = response.body().contentType();
       Charset charset = contentType != null ? contentType.charset(UTF_8) : UTF_8;
-      if (
-        (response.code() < HttpURLConnection.HTTP_MULT_CHOICE || response.code() >= HttpURLConnection.HTTP_BAD_REQUEST) &&
-        isHtml(contentType)
-      ) {
+      if (response.code() < HttpURLConnection.HTTP_MULT_CHOICE || response.code() >= HttpURLConnection.HTTP_BAD_REQUEST) {
         is = new InputStreamWithInjectedJS(is, webView.injectedJS, charset, webView.getContext());
+      } else {
+        return null;
       }
-      return new WebResourceResponse("text/html", charset.name(), is);
+
+      String reasonPhrase = response.message();
+      if(reasonPhrase.isEmpty()) reasonPhrase = "OK";
+      return new WebResourceResponse("text/html", charset.name(), response.code(), reasonPhrase, rebuildHeaders(response.headers()), is);
+
     } catch (IOException e) {
       return null;
     }
+  }
+
+  private static Map<String, String> rebuildHeaders(Headers headers){
+    Map<String, String> newHeaders =  new HashMap();
+    Set<String> headerNames = headers.names();
+    Iterator<String> itr = headerNames.iterator();
+    while(itr.hasNext()){
+      String name  = itr.next();
+      List<String> values = headers.values(name);
+      for (String val : values) {
+        newHeaders.put(name, val);
+      }
+    }
+    return newHeaders;
+
   }
 
   private static boolean isHtml(MediaType type)
@@ -273,7 +314,7 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
           if (response != null) {
             return response;
           }
-          return super.shouldInterceptRequest(request);
+          return null;
         }
       });
     }
@@ -859,7 +900,7 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
         }
       }
 
-      return super.shouldInterceptRequest(view, request);
+      return null;
     }
 
     public void setUrlPrefixesForDefaultIntent(ReadableArray specialUrls) {
