@@ -1,401 +1,1196 @@
 package com.reactnativecommunity.webview;
 
-import android.Manifest;
-import android.app.Activity;
+import android.annotation.SuppressLint;
+import android.annotation.TargetApi;
 import android.app.DownloadManager;
 import android.content.Context;
 import android.content.Intent;
+import android.content.pm.ActivityInfo;
 import android.content.pm.PackageManager;
+import android.graphics.Bitmap;
+import android.graphics.Color;
+import android.Manifest;
 import android.net.Uri;
 import android.os.Build;
 import android.os.Environment;
-import android.os.Parcelable;
-import android.provider.MediaStore;
 import androidx.annotation.RequiresApi;
 import androidx.core.content.ContextCompat;
-import androidx.core.content.FileProvider;
-import android.util.Log;
-import android.webkit.MimeTypeMap;
+import android.text.TextUtils;
+import android.view.Gravity;
+import android.view.View;
+import android.view.ViewGroup;
+import android.view.ViewGroup.LayoutParams;
+import android.view.WindowManager;
+import android.webkit.ConsoleMessage;
+import android.webkit.CookieManager;
+import android.webkit.DownloadListener;
+import android.webkit.GeolocationPermissions;
+import android.webkit.JavascriptInterface;
+import android.webkit.PermissionRequest;
+import android.webkit.ServiceWorkerClient;
+import android.webkit.ServiceWorkerController;
+import android.webkit.URLUtil;
 import android.webkit.ValueCallback;
 import android.webkit.WebChromeClient;
-import android.widget.Toast;
+import android.webkit.WebResourceRequest;
+import android.webkit.WebResourceResponse;
+import android.webkit.WebSettings;
+import android.webkit.WebView;
+import android.webkit.WebViewClient;
+import android.widget.FrameLayout;
 
-import com.facebook.react.bridge.ActivityEventListener;
-import com.facebook.react.bridge.Promise;
-import com.facebook.react.bridge.ReactApplicationContext;
-import com.facebook.react.bridge.ReactContextBaseJavaModule;
-import com.facebook.react.bridge.ReactMethod;
+import com.facebook.react.views.scroll.ScrollEvent;
+import com.facebook.react.views.scroll.ScrollEventType;
+import com.facebook.react.views.scroll.OnScrollDispatchHelper;
+import com.facebook.react.bridge.Arguments;
+import com.facebook.react.bridge.LifecycleEventListener;
+import com.facebook.react.bridge.ReactContext;
+import com.facebook.react.bridge.ReadableArray;
+import com.facebook.react.bridge.ReadableMap;
+import com.facebook.react.bridge.ReadableMapKeySetIterator;
+import com.facebook.react.bridge.WritableMap;
+import com.facebook.react.common.MapBuilder;
+import com.facebook.react.common.build.ReactBuildConfig;
 import com.facebook.react.module.annotations.ReactModule;
-import com.facebook.react.modules.core.PermissionAwareActivity;
-import com.facebook.react.modules.core.PermissionListener;
+import com.facebook.react.uimanager.SimpleViewManager;
+import com.facebook.react.uimanager.ThemedReactContext;
+import com.facebook.react.uimanager.UIManagerModule;
+import com.facebook.react.uimanager.annotations.ReactProp;
+import com.facebook.react.uimanager.events.ContentSizeChangeEvent;
+import com.facebook.react.uimanager.events.Event;
+import com.facebook.react.uimanager.events.EventDispatcher;
+import com.reactnativecommunity.webview.events.TopLoadingErrorEvent;
+import com.reactnativecommunity.webview.events.TopLoadingFinishEvent;
+import com.reactnativecommunity.webview.events.TopLoadingProgressEvent;
+import com.reactnativecommunity.webview.events.TopLoadingStartEvent;
+import com.reactnativecommunity.webview.events.TopMessageEvent;
+import com.reactnativecommunity.webview.events.TopShouldStartLoadWithRequestEvent;
 
-import java.io.File;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 import java.io.IOException;
+import java.io.InputStream;
+import java.io.UnsupportedEncodingException;
+import java.net.HttpURLConnection;
+import java.net.MalformedURLException;
+import java.net.URL;
+import java.net.URLEncoder;
+import java.nio.charset.Charset;
 import java.util.ArrayList;
+import java.util.HashMap;
+import java.util.Locale;
+import java.util.Map;
 
-import static android.app.Activity.RESULT_OK;
+import javax.annotation.Nullable;
 
-@ReactModule(name = RNCWebViewModule.MODULE_NAME)
-public class RNCWebViewModule extends ReactContextBaseJavaModule implements ActivityEventListener {
-  public static final String MODULE_NAME = "RNCWebView";
-  private static final int PICKER = 1;
-  private static final int PICKER_LEGACY = 3;
-  private static final int FILE_DOWNLOAD_PERMISSION_REQUEST = 1;
-  final String DEFAULT_MIME_TYPES = "*/*";
-  private ValueCallback<Uri> filePathCallbackLegacy;
-  private ValueCallback<Uri[]> filePathCallback;
-  private Uri outputFileUri;
-  private DownloadManager.Request downloadRequest;
-  private PermissionListener webviewFileDownloaderPermissionListener = new PermissionListener() {
-    @Override
-    public boolean onRequestPermissionsResult(int requestCode, String[] permissions, int[] grantResults) {
-      switch (requestCode) {
-        case FILE_DOWNLOAD_PERMISSION_REQUEST: {
-          // If request is cancelled, the result arrays are empty.
-          if (grantResults.length > 0 && grantResults[0] == PackageManager.PERMISSION_GRANTED) {
-            if (downloadRequest != null) {
-              downloadFile();
-            }
-          } else {
-            Toast.makeText(getCurrentActivity().getApplicationContext(), "Cannot download files as permission was denied. Please provide permission to write to storage, in order to download files.", Toast.LENGTH_LONG).show();
-          }
-          return true;
-        }
+import okhttp3.MediaType;
+import okhttp3.OkHttpClient;
+import okhttp3.Request;
+import okhttp3.Response;
+import okhttp3.OkHttpClient.Builder;
+import static okhttp3.internal.Util.UTF_8;
+
+/**
+ * Manages instances of {@link WebView}
+ * <p>
+ * Can accept following commands:
+ * - GO_BACK
+ * - GO_FORWARD
+ * - RELOAD
+ * - LOAD_URL
+ * <p>
+ * {@link WebView} instances could emit following direct events:
+ * - topLoadingFinish
+ * - topLoadingStart
+ * - topLoadingStart
+ * - topLoadingProgress
+ * - topShouldStartLoadWithRequest
+ * <p>
+ * Each event will carry the following properties:
+ * - target - view's react tag
+ * - url - url set for the webview
+ * - loading - whether webview is in a loading state
+ * - title - title of the current page
+ * - canGoBack - boolean, whether there is anything on a history stack to go back
+ * - canGoForward - boolean, whether it is possible to request GO_FORWARD command
+ */
+@ReactModule(name = RNCWebViewManager.REACT_CLASS)
+public class RNCWebViewManager extends SimpleViewManager<WebView> {
+
+  public static final int COMMAND_GO_BACK = 1;
+  public static final int COMMAND_GO_FORWARD = 2;
+  public static final int COMMAND_RELOAD = 3;
+  public static final int COMMAND_STOP_LOADING = 4;
+  public static final int COMMAND_POST_MESSAGE = 5;
+  public static final int COMMAND_INJECT_JAVASCRIPT = 6;
+  public static final int COMMAND_LOAD_URL = 7;
+  public static final int COMMAND_FOCUS = 8;
+  protected static final String REACT_CLASS = "RNCWebView";
+  protected final static String HEADER_CONTENT_TYPE = "content-type";
+  protected static final String MIME_TEXT_HTML = "text/html";
+  protected static final String MIME_UNKNOWN = "application/octet-stream";
+  protected static final String HTML_ENCODING = "UTF-8";
+  protected static final String HTML_MIME_TYPE = "text/html";
+  protected static final String JAVASCRIPT_INTERFACE = "ReactNativeWebView";
+  protected static final String HTTP_METHOD_POST = "POST";
+  // Use `webView.loadUrl("about:blank")` to reliably reset the view
+  // state and release page resources (including any running JavaScript).
+  protected static final String BLANK_URL = "about:blank";
+  protected WebViewConfig mWebViewConfig;
+  private OkHttpClient httpClient;
+
+  protected RNCWebChromeClient mWebChromeClient = null;
+  protected boolean mAllowsFullscreenVideo = false;
+  protected @Nullable String mUserAgent = null;
+  protected @Nullable String mUserAgentWithApplicationName = null;
+
+  public RNCWebViewManager() {
+    Builder b = new Builder();
+    httpClient = b
+      .followRedirects(false)
+      .followSslRedirects(false)
+      .build();
+
+    mWebViewConfig = new WebViewConfig() {
+      public void configWebView(WebView webView) {
       }
-      return false;
-    }
-  };
+    };
+  }
 
-  public RNCWebViewModule(ReactApplicationContext reactContext) {
-    super(reactContext);
-    reactContext.addActivityEventListener(this);
+  public RNCWebViewManager(WebViewConfig webViewConfig) {
+    mWebViewConfig = webViewConfig;
+  }
+
+  protected static void dispatchEvent(WebView webView, Event event) {
+    ReactContext reactContext = (ReactContext) webView.getContext();
+    EventDispatcher eventDispatcher =
+      reactContext.getNativeModule(UIManagerModule.class).getEventDispatcher();
+    eventDispatcher.dispatchEvent(event);
   }
 
   @Override
   public String getName() {
-    return MODULE_NAME;
+    return REACT_CLASS;
   }
 
-  @ReactMethod
-  public void isFileUploadSupported(final Promise promise) {
-    Boolean result = false;
-    int current = Build.VERSION.SDK_INT;
-    if (current >= Build.VERSION_CODES.LOLLIPOP) {
-      result = true;
-    }
-    if (current >= Build.VERSION_CODES.JELLY_BEAN && current <= Build.VERSION_CODES.JELLY_BEAN_MR2) {
-      result = true;
-    }
-    promise.resolve(result);
+  public static Boolean urlStringLooksInvalid(String urlString) {
+    return urlString == null ||
+      urlString.trim().equals("") ||
+      !(urlString.startsWith("http") && !urlString.startsWith("www")) ||
+      urlString.contains("|");
   }
 
-  public void onActivityResult(Activity activity, int requestCode, int resultCode, Intent data) {
-
-    if (filePathCallback == null && filePathCallbackLegacy == null) {
-      return;
+  public static Boolean responseRequiresJSInjection(Response response) {
+    if (response.isRedirect()) {
+      return false;
     }
-
-    // based off of which button was pressed, we get an activity result and a file
-    // the camera activity doesn't properly return the filename* (I think?) so we use
-    // this filename instead
-    switch (requestCode) {
-      case PICKER:
-        if (resultCode != RESULT_OK) {
-          if (filePathCallback != null) {
-            filePathCallback.onReceiveValue(null);
-          }
-        } else {
-          Uri result[] = this.getSelectedFiles(data, resultCode);
-          if (result != null) {
-            filePathCallback.onReceiveValue(result);
-          } else {
-            filePathCallback.onReceiveValue(new Uri[]{outputFileUri});
-          }
-        }
-        break;
-      case PICKER_LEGACY:
-        Uri result = resultCode != Activity.RESULT_OK ? null : data == null ? outputFileUri : data.getData();
-        filePathCallbackLegacy.onReceiveValue(result);
-        break;
-
-    }
-    filePathCallback = null;
-    filePathCallbackLegacy = null;
-    outputFileUri = null;
-  }
-
-  public void onNewIntent(Intent intent) {
-  }
-
-  private Uri[] getSelectedFiles(Intent data, int resultCode) {
-    if (data == null) {
-      return null;
-    }
-
-    // we have one file selected
-    if (data.getData() != null) {
-      if (resultCode == RESULT_OK && Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
-        return WebChromeClient.FileChooserParams.parseResult(resultCode, data);
-      } else {
-        return null;
-      }
-    }
-
-    // we have multiple files selected
-    if (data.getClipData() != null) {
-      final int numSelectedFiles = data.getClipData().getItemCount();
-      Uri[] result = new Uri[numSelectedFiles];
-      for (int i = 0; i < numSelectedFiles; i++) {
-        result[i] = data.getClipData().getItemAt(i).getUri();
-      }
-      return result;
-    }
-    return null;
-  }
-
-  public void startPhotoPickerIntent(ValueCallback<Uri> filePathCallback, String acceptType) {
-    filePathCallbackLegacy = filePathCallback;
-
-    Intent fileChooserIntent = getFileChooserIntent(acceptType);
-    Intent chooserIntent = Intent.createChooser(fileChooserIntent, "");
-
-    ArrayList<Parcelable> extraIntents = new ArrayList<>();
-    if (acceptsImages(acceptType)) {
-      extraIntents.add(getPhotoIntent());
-    }
-    if (acceptsVideo(acceptType)) {
-      extraIntents.add(getVideoIntent());
-    }
-    chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, extraIntents.toArray(new Parcelable[]{}));
-
-    if (chooserIntent.resolveActivity(getCurrentActivity().getPackageManager()) != null) {
-      getCurrentActivity().startActivityForResult(chooserIntent, PICKER_LEGACY);
-    } else {
-      Log.w("RNCWebViewModule", "there is no Activity to handle this Intent");
-    }
+    final String contentTypeAndCharset = response.header(HEADER_CONTENT_TYPE, MIME_UNKNOWN);
+    return contentTypeAndCharset.startsWith(MIME_TEXT_HTML);
   }
 
   @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)
-  public boolean startPhotoPickerIntent(final ValueCallback<Uri[]> callback, final Intent intent, final String[] acceptTypes, final boolean allowMultiple) {
-    filePathCallback = callback;
-
-    ArrayList<Parcelable> extraIntents = new ArrayList<>();
-    if (acceptsImages(acceptTypes)) {
-      extraIntents.add(getPhotoIntent());
+  public WebResourceResponse shouldInterceptRequest(WebResourceRequest request, Boolean onlyMainFrame, RNCWebView webView) {
+    Uri url = request.getUrl();
+    String urlStr = url.toString();
+    if (onlyMainFrame && !request.isForMainFrame()) {
+      return null;
     }
-    if (acceptsVideo(acceptTypes)) {
-      extraIntents.add(getVideoIntent());
+    if (RNCWebViewManager.urlStringLooksInvalid(urlStr)) {
+      return null;
+    }
+    try {
+
+
+      Request req = new Request.Builder()
+        .header("User-Agent", mUserAgent)
+        .url(urlStr)
+        .build();
+      Response response = httpClient.newCall(req).execute();
+      if (!RNCWebViewManager.responseRequiresJSInjection(response)) {
+        return null;
+      }
+      InputStream is = response.body().byteStream();
+      MediaType contentType = response.body().contentType();
+      Charset charset = contentType != null ? contentType.charset(UTF_8) : UTF_8;
+      if (
+        (response.code() < HttpURLConnection.HTTP_MULT_CHOICE || response.code() >= HttpURLConnection.HTTP_BAD_REQUEST) &&
+        isHtml(contentType))
+      ) {
+        is = new InputStreamWithInjectedJS(is, webView.injectedJS, charset, webView.getContext());
+      }
+      return new WebResourceResponse("text/html", charset.name(), is);
+    } catch (IOException e) {
+      return null;
+    }
+  }
+
+  private static boolean isHtml(MediaType type)
+  {
+      return (type != null) && "text".equals(type.type()) && "html".equals(type.subtype());
+  }
+
+  protected RNCWebView createRNCWebViewInstance(ThemedReactContext reactContext) {
+    return new RNCWebView(reactContext);
+  }
+
+  @Override
+  @TargetApi(Build.VERSION_CODES.LOLLIPOP)
+  protected WebView createViewInstance(ThemedReactContext reactContext) {
+    RNCWebView webView = createRNCWebViewInstance(reactContext);
+    setupWebChromeClient(reactContext, webView);
+    reactContext.addLifecycleEventListener(webView);
+    mWebViewConfig.configWebView(webView);
+    mUserAgent = "Mozilla/5.0 (Linux; Android 8.1.0; Android SDK built for x86 Build/OSM1.180201.023) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/61.0.3163.98 Mobile Safari/537.36";
+    WebSettings settings = webView.getSettings();
+    settings.setBuiltInZoomControls(true);
+    settings.setDisplayZoomControls(false);
+    settings.setDomStorageEnabled(true);
+
+    settings.setAllowFileAccess(false);
+    settings.setAllowContentAccess(false);
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN) {
+      settings.setAllowFileAccessFromFileURLs(false);
+      setAllowUniversalAccessFromFileURLs(webView, false);
+    }
+    setMixedContentMode(webView, "never");
+
+    // Fixes broken full-screen modals/galleries due to body height being 0.
+    webView.setLayoutParams(
+      new LayoutParams(LayoutParams.MATCH_PARENT,
+        LayoutParams.MATCH_PARENT));
+
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+      WebView.setWebContentsDebuggingEnabled(true);
     }
 
-    Intent fileSelectionIntent = getFileChooserIntent(acceptTypes, allowMultiple);
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.N) {
+      ServiceWorkerController swController = ServiceWorkerController.getInstance();
+      swController.setServiceWorkerClient(new ServiceWorkerClient() {
+        @Override
+        public WebResourceResponse shouldInterceptRequest(WebResourceRequest request) {
+          WebResourceResponse response = RNCWebViewManager.this.shouldInterceptRequest(request, false, webView);
+          if (response != null) {
+            return response;
+          }
+          return super.shouldInterceptRequest(request);
+        }
+      });
+    }
 
-    Intent chooserIntent = new Intent(Intent.ACTION_CHOOSER);
-    chooserIntent.putExtra(Intent.EXTRA_INTENT, fileSelectionIntent);
-    chooserIntent.putExtra(Intent.EXTRA_INITIAL_INTENTS, extraIntents.toArray(new Parcelable[]{}));
 
-    if (chooserIntent.resolveActivity(getCurrentActivity().getPackageManager()) != null) {
-      getCurrentActivity().startActivityForResult(chooserIntent, PICKER);
+    webView.setDownloadListener(new DownloadListener() {
+      public void onDownloadStart(String url, String userAgent, String contentDisposition, String mimetype, long contentLength) {
+        RNCWebViewModule module = getModule(reactContext);
+
+        DownloadManager.Request request = new DownloadManager.Request(Uri.parse(url));
+
+        String fileName = URLUtil.guessFileName(url, contentDisposition, mimetype);
+        String downloadMessage = "Downloading " + fileName;
+
+        //Attempt to add cookie, if it exists
+        URL urlObj = null;
+        try {
+          urlObj = new URL(url);
+          String baseUrl = urlObj.getProtocol() + "://" + urlObj.getHost();
+          String cookie = CookieManager.getInstance().getCookie(baseUrl);
+          request.addRequestHeader("Cookie", cookie);
+          System.out.println("Got cookie for DownloadManager: " + cookie);
+        } catch (MalformedURLException e) {
+          System.out.println("Error getting cookie for DownloadManager: " + e.toString());
+          e.printStackTrace();
+        }
+
+        //Finish setting up request
+        request.addRequestHeader("User-Agent", userAgent);
+        request.setTitle(fileName);
+        request.setDescription(downloadMessage);
+        request.allowScanningByMediaScanner();
+        request.setNotificationVisibility(DownloadManager.Request.VISIBILITY_VISIBLE_NOTIFY_COMPLETED);
+        request.setDestinationInExternalPublicDir(Environment.DIRECTORY_DOWNLOADS, fileName);
+
+        module.setDownloadRequest(request);
+
+        if (module.grantFileDownloaderPermissions()) {
+          module.downloadFile();
+        }
+      }
+    });
+
+    return webView;
+  }
+
+  @ReactProp(name = "javaScriptEnabled")
+  public void setJavaScriptEnabled(WebView view, boolean enabled) {
+    view.getSettings().setJavaScriptEnabled(enabled);
+  }
+
+  @ReactProp(name = "showsHorizontalScrollIndicator")
+  public void setShowsHorizontalScrollIndicator(WebView view, boolean enabled) {
+    view.setHorizontalScrollBarEnabled(enabled);
+  }
+
+  @ReactProp(name = "showsVerticalScrollIndicator")
+  public void setShowsVerticalScrollIndicator(WebView view, boolean enabled) {
+    view.setVerticalScrollBarEnabled(enabled);
+  }
+
+  @ReactProp(name = "cacheEnabled")
+  public void setCacheEnabled(WebView view, boolean enabled) {
+    if (enabled) {
+      Context ctx = view.getContext();
+      if (ctx != null) {
+        view.getSettings().setAppCachePath(ctx.getCacheDir().getAbsolutePath());
+        view.getSettings().setCacheMode(WebSettings.LOAD_DEFAULT);
+        view.getSettings().setAppCacheEnabled(true);
+      }
     } else {
-      Log.w("RNCWebViewModule", "there is no Activity to handle this Intent");
+      view.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
+      view.getSettings().setAppCacheEnabled(false);
+    }
+  }
+
+  @ReactProp(name = "androidHardwareAccelerationDisabled")
+  public void setHardwareAccelerationDisabled(WebView view, boolean disabled) {
+    if (disabled) {
+      view.setLayerType(View.LAYER_TYPE_SOFTWARE, null);
+    } else {
+      view.setLayerType(View.LAYER_TYPE_NONE, null);
+    }
+  }
+
+  @ReactProp(name = "overScrollMode")
+  public void setOverScrollMode(WebView view, String overScrollModeString) {
+    Integer overScrollMode;
+    switch (overScrollModeString) {
+      case "never":
+        overScrollMode = View.OVER_SCROLL_NEVER;
+        break;
+      case "content":
+        overScrollMode = View.OVER_SCROLL_IF_CONTENT_SCROLLS;
+        break;
+      case "always":
+      default:
+        overScrollMode = View.OVER_SCROLL_ALWAYS;
+        break;
+    }
+    view.setOverScrollMode(overScrollMode);
+  }
+
+  @ReactProp(name = "thirdPartyCookiesEnabled")
+  public void setThirdPartyCookiesEnabled(WebView view, boolean enabled) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+      CookieManager.getInstance().setAcceptThirdPartyCookies(view, enabled);
+    }
+  }
+
+  @ReactProp(name = "textZoom")
+  public void setTextZoom(WebView view, int value) {
+    view.getSettings().setTextZoom(value);
+  }
+
+  @ReactProp(name = "scalesPageToFit")
+  public void setScalesPageToFit(WebView view, boolean enabled) {
+    view.getSettings().setLoadWithOverviewMode(enabled);
+    view.getSettings().setUseWideViewPort(enabled);
+  }
+
+  @ReactProp(name = "domStorageEnabled")
+  public void setDomStorageEnabled(WebView view, boolean enabled) {
+    view.getSettings().setDomStorageEnabled(enabled);
+  }
+
+  @ReactProp(name = "userAgent")
+  public void setUserAgent(WebView view, @Nullable String userAgent) {
+    if (userAgent != null) {
+      mUserAgent = userAgent;
+    } else {
+      mUserAgent = null;
+    }
+    this.setUserAgentString(view);
+  }
+
+  @ReactProp(name = "applicationNameForUserAgent")
+  public void setApplicationNameForUserAgent(WebView view, @Nullable String applicationName) {
+    if(applicationName != null) {
+      if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+        String defaultUserAgent = WebSettings.getDefaultUserAgent(view.getContext());
+        mUserAgentWithApplicationName = defaultUserAgent + " " + applicationName;
+      }
+    } else {
+      mUserAgentWithApplicationName = null;
+    }
+    this.setUserAgentString(view);
+  }
+
+  protected void setUserAgentString(WebView view) {
+    if(mUserAgent != null) {
+      view.getSettings().setUserAgentString(mUserAgent);
+    } else if(mUserAgentWithApplicationName != null) {
+      view.getSettings().setUserAgentString(mUserAgentWithApplicationName);
+    } else if(Build.VERSION.SDK_INT >= Build.VERSION_CODES.JELLY_BEAN_MR1) {
+      // handle unsets of `userAgent` prop as long as device is >= API 17
+      view.getSettings().setUserAgentString(WebSettings.getDefaultUserAgent(view.getContext()));
+    }
+  }
+
+  @TargetApi(Build.VERSION_CODES.JELLY_BEAN_MR1)
+  @ReactProp(name = "mediaPlaybackRequiresUserAction")
+  public void setMediaPlaybackRequiresUserAction(WebView view, boolean requires) {
+    view.getSettings().setMediaPlaybackRequiresUserGesture(requires);
+  }
+
+  @ReactProp(name = "allowUniversalAccessFromFileURLs")
+  public void setAllowUniversalAccessFromFileURLs(WebView view, boolean allow) {
+    view.getSettings().setAllowUniversalAccessFromFileURLs(allow);
+  }
+
+  @ReactProp(name = "saveFormDataDisabled")
+  public void setSaveFormDataDisabled(WebView view, boolean disable) {
+    view.getSettings().setSaveFormData(!disable);
+  }
+
+  @ReactProp(name = "injectedJavaScript")
+  public void setInjectedJavaScript(WebView view, @Nullable String injectedJavaScript) {
+    ((RNCWebView) view).setInjectedJavaScript(injectedJavaScript);
+  }
+
+  @ReactProp(name = "messagingEnabled")
+  public void setMessagingEnabled(WebView view, boolean enabled) {
+    ((RNCWebView) view).setMessagingEnabled(enabled);
+  }
+
+  @ReactProp(name = "incognito")
+  public void setIncognito(WebView view, boolean enabled) {
+    // Remove all previous cookies
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+      CookieManager.getInstance().removeAllCookies(null);
+    } else {
+      CookieManager.getInstance().removeAllCookie();
     }
 
-    return true;
+    // Disable caching
+    view.getSettings().setCacheMode(WebSettings.LOAD_NO_CACHE);
+    view.getSettings().setAppCacheEnabled(!enabled);
+    view.clearHistory();
+    view.clearCache(enabled);
+
+    // No form data or autofill enabled
+    view.clearFormData();
+    view.getSettings().setSavePassword(!enabled);
+    view.getSettings().setSaveFormData(!enabled);
   }
 
-  public void setDownloadRequest(DownloadManager.Request request) {
-    this.downloadRequest = request;
+  @ReactProp(name = "source")
+  public void setSource(WebView view, @Nullable ReadableMap source) {
+    if (source != null) {
+      if (source.hasKey("html")) {
+        String html = source.getString("html");
+        String baseUrl = source.hasKey("baseUrl") ? source.getString("baseUrl") : "";
+        view.loadDataWithBaseURL(baseUrl, html, HTML_MIME_TYPE, HTML_ENCODING, null);
+        return;
+      }
+      if (source.hasKey("uri")) {
+        String url = source.getString("uri");
+        String previousUrl = view.getUrl();
+        if (previousUrl != null && previousUrl.equals(url)) {
+          return;
+        }
+        if (source.hasKey("method")) {
+          String method = source.getString("method");
+          if (method.equalsIgnoreCase(HTTP_METHOD_POST)) {
+            byte[] postData = null;
+            if (source.hasKey("body")) {
+              String body = source.getString("body");
+              try {
+                postData = body.getBytes("UTF-8");
+              } catch (UnsupportedEncodingException e) {
+                postData = body.getBytes();
+              }
+            }
+            if (postData == null) {
+              postData = new byte[0];
+            }
+            view.postUrl(url, postData);
+            return;
+          }
+        }
+        HashMap<String, String> headerMap = new HashMap<>();
+        if (source.hasKey("headers")) {
+          ReadableMap headers = source.getMap("headers");
+          ReadableMapKeySetIterator iter = headers.keySetIterator();
+          while (iter.hasNextKey()) {
+            String key = iter.nextKey();
+            if ("user-agent".equals(key.toLowerCase(Locale.ENGLISH))) {
+              if (view.getSettings() != null) {
+                view.getSettings().setUserAgentString(headers.getString(key));
+              }
+            } else {
+              headerMap.put(key, headers.getString(key));
+            }
+          }
+        }
+        view.loadUrl(url, headerMap);
+        return;
+      }
+    }
+    view.loadUrl(BLANK_URL);
   }
 
-  public void downloadFile() {
-    DownloadManager dm = (DownloadManager) getCurrentActivity().getBaseContext().getSystemService(Context.DOWNLOAD_SERVICE);
-    String downloadMessage = "Downloading";
-
-    dm.enqueue(this.downloadRequest);
-
-    Toast.makeText(getCurrentActivity().getApplicationContext(), downloadMessage, Toast.LENGTH_LONG).show();
+  @ReactProp(name = "onContentSizeChange")
+  public void setOnContentSizeChange(WebView view, boolean sendContentSizeChangeEvents) {
+    ((RNCWebView) view).setSendContentSizeChangeEvents(sendContentSizeChangeEvents);
   }
 
-  public boolean grantFileDownloaderPermissions() {
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
+  @ReactProp(name = "mixedContentMode")
+  public void setMixedContentMode(WebView view, @Nullable String mixedContentMode) {
+    if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.LOLLIPOP) {
+      if (mixedContentMode == null || "never".equals(mixedContentMode)) {
+        view.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_NEVER_ALLOW);
+      } else if ("always".equals(mixedContentMode)) {
+        view.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_ALWAYS_ALLOW);
+      } else if ("compatibility".equals(mixedContentMode)) {
+        view.getSettings().setMixedContentMode(WebSettings.MIXED_CONTENT_COMPATIBILITY_MODE);
+      }
+    }
+  }
+
+  @ReactProp(name = "urlPrefixesForDefaultIntent")
+  public void setUrlPrefixesForDefaultIntent(
+    WebView view,
+    @Nullable ReadableArray urlPrefixesForDefaultIntent) {
+    RNCWebViewClient client = ((RNCWebView) view).getRNCWebViewClient();
+    if (client != null && urlPrefixesForDefaultIntent != null) {
+      client.setUrlPrefixesForDefaultIntent(urlPrefixesForDefaultIntent);
+    }
+  }
+
+  @ReactProp(name = "allowsFullscreenVideo")
+  public void setAllowsFullscreenVideo(
+    WebView view,
+    @Nullable Boolean allowsFullscreenVideo) {
+    mAllowsFullscreenVideo = allowsFullscreenVideo != null && allowsFullscreenVideo;
+    setupWebChromeClient((ReactContext)view.getContext(), view);
+  }
+
+  @ReactProp(name = "allowFileAccess")
+  public void setAllowFileAccess(
+    WebView view,
+    @Nullable Boolean allowFileAccess) {
+    view.getSettings().setAllowFileAccess(allowFileAccess != null && allowFileAccess);
+  }
+
+  @ReactProp(name = "geolocationEnabled")
+  public void setGeolocationEnabled(
+    WebView view,
+    @Nullable Boolean isGeolocationEnabled) {
+    view.getSettings().setGeolocationEnabled(isGeolocationEnabled != null && isGeolocationEnabled);
+  }
+
+  @ReactProp(name = "onScroll")
+  public void setOnScroll(WebView view, boolean hasScrollEvent) {
+    ((RNCWebView) view).setHasScrollEvent(hasScrollEvent);
+  }
+
+  @Override
+  protected void addEventEmitters(ThemedReactContext reactContext, WebView view) {
+    // Do not register default touch emitter and let WebView implementation handle touches
+    view.setWebViewClient(new RNCWebViewClient());
+  }
+
+  @Override
+  public Map getExportedCustomDirectEventTypeConstants() {
+    Map export = super.getExportedCustomDirectEventTypeConstants();
+    if (export == null) {
+      export = MapBuilder.newHashMap();
+    }
+    export.put(TopLoadingProgressEvent.EVENT_NAME, MapBuilder.of("registrationName", "onLoadingProgress"));
+    export.put(TopShouldStartLoadWithRequestEvent.EVENT_NAME, MapBuilder.of("registrationName", "onShouldStartLoadWithRequest"));
+    export.put(ScrollEventType.getJSEventName(ScrollEventType.SCROLL), MapBuilder.of("registrationName", "onScroll"));
+    return export;
+  }
+
+  @Override
+  public @Nullable
+  Map<String, Integer> getCommandsMap() {
+    Map map = MapBuilder.of(
+      "goBack", COMMAND_GO_BACK,
+      "goForward", COMMAND_GO_FORWARD,
+      "reload", COMMAND_RELOAD,
+      "stopLoading", COMMAND_STOP_LOADING,
+      "postMessage", COMMAND_POST_MESSAGE,
+      "injectJavaScript", COMMAND_INJECT_JAVASCRIPT,
+      "loadUrl", COMMAND_LOAD_URL
+    );
+    map.put("requestFocus", COMMAND_FOCUS);
+    return map;
+  }
+
+  @Override
+  public void receiveCommand(WebView root, int commandId, @Nullable ReadableArray args) {
+    switch (commandId) {
+      case COMMAND_GO_BACK:
+        root.goBack();
+        break;
+      case COMMAND_GO_FORWARD:
+        root.goForward();
+        break;
+      case COMMAND_RELOAD:
+        root.reload();
+        break;
+      case COMMAND_STOP_LOADING:
+        root.stopLoading();
+        break;
+      case COMMAND_POST_MESSAGE:
+        try {
+          RNCWebView reactWebView = (RNCWebView) root;
+          JSONObject eventInitDict = new JSONObject();
+          eventInitDict.put("data", args.getString(0));
+          reactWebView.evaluateJavascriptWithFallback("(function () {" +
+            "var event;" +
+            "var data = " + eventInitDict.toString() + ";" +
+            "try {" +
+            "event = new MessageEvent('message', data);" +
+            "} catch (e) {" +
+            "event = document.createEvent('MessageEvent');" +
+            "event.initMessageEvent('message', true, true, data.data, data.origin, data.lastEventId, data.source);" +
+            "}" +
+            "document.dispatchEvent(event);" +
+            "})();");
+        } catch (JSONException e) {
+          throw new RuntimeException(e);
+        }
+        break;
+      case COMMAND_INJECT_JAVASCRIPT:
+        RNCWebView reactWebView = (RNCWebView) root;
+        reactWebView.evaluateJavascriptWithFallback(args.getString(0));
+        break;
+      case COMMAND_LOAD_URL:
+        if (args == null) {
+          throw new RuntimeException("Arguments for loading an url are null!");
+        }
+        root.loadUrl(args.getString(0));
+        break;
+      case COMMAND_FOCUS:
+        root.requestFocus();
+        break;
+    }
+  }
+
+  @Override
+  public void onDropViewInstance(WebView webView) {
+    super.onDropViewInstance(webView);
+    ((ThemedReactContext) webView.getContext()).removeLifecycleEventListener((RNCWebView) webView);
+    ((RNCWebView) webView).cleanupCallbacksAndDestroy();
+  }
+
+  public static RNCWebViewModule getModule(ReactContext reactContext) {
+    return reactContext.getNativeModule(RNCWebViewModule.class);
+  }
+
+  protected void setupWebChromeClient(ReactContext reactContext, WebView webView) {
+    if (mAllowsFullscreenVideo) {
+      int initialRequestedOrientation = reactContext.getCurrentActivity().getRequestedOrientation();
+      mWebChromeClient = new RNCWebChromeClient(reactContext, webView) {
+        @Override
+        public void onShowCustomView(View view, CustomViewCallback callback) {
+          if (mVideoView != null) {
+            callback.onCustomViewHidden();
+            return;
+          }
+
+          mVideoView = view;
+          mCustomViewCallback = callback;
+
+          mReactContext.getCurrentActivity().setRequestedOrientation(ActivityInfo.SCREEN_ORIENTATION_UNSPECIFIED);
+
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            mVideoView.setSystemUiVisibility(FULLSCREEN_SYSTEM_UI_VISIBILITY);
+            mReactContext.getCurrentActivity().getWindow().setFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS, WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+          }
+
+          mVideoView.setBackgroundColor(Color.BLACK);
+          getRootView().addView(mVideoView, FULLSCREEN_LAYOUT_PARAMS);
+          mWebView.setVisibility(View.GONE);
+
+          mReactContext.addLifecycleEventListener(this);
+        }
+
+        @Override
+        public void onHideCustomView() {
+          if (mVideoView == null) {
+            return;
+          }
+
+          mVideoView.setVisibility(View.GONE);
+          getRootView().removeView(mVideoView);
+          mCustomViewCallback.onCustomViewHidden();
+
+          mVideoView = null;
+          mCustomViewCallback = null;
+
+          mWebView.setVisibility(View.VISIBLE);
+
+          if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+            mReactContext.getCurrentActivity().getWindow().clearFlags(WindowManager.LayoutParams.FLAG_LAYOUT_NO_LIMITS);
+          }
+          mReactContext.getCurrentActivity().setRequestedOrientation(initialRequestedOrientation);
+
+          mReactContext.removeLifecycleEventListener(this);
+        }
+      };
+      webView.setWebChromeClient(mWebChromeClient);
+    } else {
+      if (mWebChromeClient != null) {
+        mWebChromeClient.onHideCustomView();
+      }
+      mWebChromeClient = new RNCWebChromeClient(reactContext, webView);
+      webView.setWebChromeClient(mWebChromeClient);
+    }
+  }
+
+  protected class RNCWebViewClient extends WebViewClient {
+
+    protected boolean mLastLoadFailed = false;
+    protected @Nullable
+    ReadableArray mUrlPrefixesForDefaultIntent;
+
+    @Override
+    public void onPageFinished(WebView webView, String url) {
+      super.onPageFinished(webView, url);
+
+      if (!mLastLoadFailed) {
+        emitFinishEvent(webView, url);
+      }
+    }
+
+    @Override
+    public void onPageStarted(WebView webView, String url, Bitmap favicon) {
+      super.onPageStarted(webView, url, favicon);
+      mLastLoadFailed = false;
+
+      dispatchEvent(
+        webView,
+        new TopLoadingStartEvent(
+          webView.getId(),
+          createWebViewEvent(webView, url)));
+    }
+
+    @Override
+    public boolean shouldOverrideUrlLoading(WebView view, String url) {
+      dispatchEvent(
+        view,
+        new TopShouldStartLoadWithRequestEvent(
+          view.getId(),
+          createWebViewEvent(view, url)));
       return true;
     }
 
-    boolean result = true;
-    if (ContextCompat.checkSelfPermission(getCurrentActivity(), Manifest.permission.WRITE_EXTERNAL_STORAGE) != PackageManager.PERMISSION_GRANTED) {
-      result = false;
-    }
 
-    if (!result) {
-      PermissionAwareActivity activity = getPermissionAwareActivity();
-      activity.requestPermissions(new String[]{Manifest.permission.WRITE_EXTERNAL_STORAGE}, FILE_DOWNLOAD_PERMISSION_REQUEST, webviewFileDownloaderPermissionListener);
-    }
-
-    return result;
-  }
-
-  private Intent getPhotoIntent() {
-    Intent intent = new Intent(MediaStore.ACTION_IMAGE_CAPTURE);
-    outputFileUri = getOutputUri(MediaStore.ACTION_IMAGE_CAPTURE);
-    intent.putExtra(MediaStore.EXTRA_OUTPUT, outputFileUri);
-    return intent;
-  }
-
-  private Intent getVideoIntent() {
-    Intent intent = new Intent(MediaStore.ACTION_VIDEO_CAPTURE);
-    // @todo from experience, for Videos we get the data onActivityResult
-    // so there's no need to store the Uri
-    outputFileUri = getOutputUri(MediaStore.ACTION_VIDEO_CAPTURE);
-    intent.putExtra(MediaStore.EXTRA_OUTPUT, outputFileUri);
-    return intent;
-  }
-
-  private Intent getFileChooserIntent(String acceptTypes) {
-    String _acceptTypes = acceptTypes;
-    if (acceptTypes.isEmpty()) {
-      _acceptTypes = DEFAULT_MIME_TYPES;
-    }
-    if (acceptTypes.matches("\\.\\w+")) {
-      _acceptTypes = getMimeTypeFromExtension(acceptTypes.replace(".", ""));
-    }
-    Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-    intent.addCategory(Intent.CATEGORY_OPENABLE);
-    intent.setType(_acceptTypes);
-    return intent;
-  }
-
-  private Intent getFileChooserIntent(String[] acceptTypes, boolean allowMultiple) {
-    Intent intent = new Intent(Intent.ACTION_GET_CONTENT);
-    intent.addCategory(Intent.CATEGORY_OPENABLE);
-    intent.setType("*/*");
-    intent.putExtra(Intent.EXTRA_MIME_TYPES, getAcceptedMimeType(acceptTypes));
-    intent.putExtra(Intent.EXTRA_ALLOW_MULTIPLE, allowMultiple);
-    return intent;
-  }
-
-  private Boolean acceptsImages(String types) {
-    String mimeType = types;
-    if (types.matches("\\.\\w+")) {
-      mimeType = getMimeTypeFromExtension(types.replace(".", ""));
-    }
-    return mimeType.isEmpty() || mimeType.toLowerCase().contains("image");
-  }
-
-  private Boolean acceptsImages(String[] types) {
-    String[] mimeTypes = getAcceptedMimeType(types);
-    return isArrayEmpty(mimeTypes) || arrayContainsString(mimeTypes, "image");
-  }
-
-  private Boolean acceptsVideo(String types) {
-    String mimeType = types;
-    if (types.matches("\\.\\w+")) {
-      mimeType = getMimeTypeFromExtension(types.replace(".", ""));
-    }
-    return mimeType.isEmpty() || mimeType.toLowerCase().contains("video");
-  }
-
-  private Boolean acceptsVideo(String[] types) {
-    String[] mimeTypes = getAcceptedMimeType(types);
-    return isArrayEmpty(mimeTypes) || arrayContainsString(mimeTypes, "video");
-  }
-
-  private Boolean arrayContainsString(String[] array, String pattern) {
-    for (String content : array) {
-      if (content.contains(pattern)) {
-        return true;
+    @TargetApi(Build.VERSION_CODES.N)
+    @Override
+    public boolean shouldOverrideUrlLoading(WebView view, WebResourceRequest request) {
+      final String url = request.getUrl().toString();
+      // Disabling the URL schemes that cause problems
+      String[] blacklistedUrls = { "intent:#Intent;action=com.ledger.android.u2f.bridge.AUTHENTICATE" };
+      for(int i=0; i< blacklistedUrls.length; i++){
+        String badUrl = blacklistedUrls[i];
+        if(url.contains(badUrl)){
+          return true;
+        }
       }
+      return this.shouldOverrideUrlLoading(view, url);
     }
-    return false;
+
+    @Override
+    public void onReceivedError(
+      WebView webView,
+      int errorCode,
+      String description,
+      String failingUrl) {
+      super.onReceivedError(webView, errorCode, description, failingUrl);
+      mLastLoadFailed = true;
+
+      // In case of an error JS side expect to get a finish event first, and then get an error event
+      // Android WebView does it in the opposite way, so we need to simulate that behavior
+      emitFinishEvent(webView, failingUrl);
+
+      WritableMap eventData = createWebViewEvent(webView, failingUrl);
+      eventData.putDouble("code", errorCode);
+      eventData.putString("description", description);
+
+      dispatchEvent(
+        webView,
+        new TopLoadingErrorEvent(webView.getId(), eventData));
+    }
+
+    protected void emitFinishEvent(WebView webView, String url) {
+      dispatchEvent(
+        webView,
+        new TopLoadingFinishEvent(
+          webView.getId(),
+          createWebViewEvent(webView, url)));
+    }
+
+    protected WritableMap createWebViewEvent(WebView webView, String url) {
+      WritableMap event = Arguments.createMap();
+      event.putDouble("target", webView.getId());
+      // Don't use webView.getUrl() here, the URL isn't updated to the new value yet in callbacks
+      // like onPageFinished
+      event.putString("url", url);
+      event.putBoolean("loading", !mLastLoadFailed && webView.getProgress() != 100);
+      event.putString("title", webView.getTitle());
+      event.putBoolean("canGoBack", webView.canGoBack());
+      event.putBoolean("canGoForward", webView.canGoForward());
+      return event;
+    }
+
+    @Override
+    public WebResourceResponse shouldInterceptRequest(WebView view, String url) {
+      return null;
+    }
+    @Override
+    public WebResourceResponse shouldInterceptRequest(WebView view, WebResourceRequest request) {
+      WebResourceResponse response = null;
+      if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.LOLLIPOP) {
+        response = RNCWebViewManager.this.shouldInterceptRequest(request, false, (RNCWebView) view);
+        if (response != null) {
+          return response;
+        }
+      }
+
+      return super.shouldInterceptRequest(view, request);
+    }
+
+    public void setUrlPrefixesForDefaultIntent(ReadableArray specialUrls) {
+      mUrlPrefixesForDefaultIntent = specialUrls;
+    }
   }
 
-  private String[] getAcceptedMimeType(String[] types) {
-    if (isArrayEmpty(types)) {
-      return new String[]{DEFAULT_MIME_TYPES};
+  protected static class RNCWebChromeClient extends WebChromeClient implements LifecycleEventListener {
+    protected static final FrameLayout.LayoutParams FULLSCREEN_LAYOUT_PARAMS = new FrameLayout.LayoutParams(
+      LayoutParams.MATCH_PARENT, LayoutParams.MATCH_PARENT, Gravity.CENTER);
+
+    @RequiresApi(api = Build.VERSION_CODES.KITKAT)
+    protected static final int FULLSCREEN_SYSTEM_UI_VISIBILITY = View.SYSTEM_UI_FLAG_LAYOUT_HIDE_NAVIGATION |
+      View.SYSTEM_UI_FLAG_LAYOUT_FULLSCREEN |
+      View.SYSTEM_UI_FLAG_LAYOUT_STABLE |
+      View.SYSTEM_UI_FLAG_HIDE_NAVIGATION |
+      View.SYSTEM_UI_FLAG_FULLSCREEN |
+      View.SYSTEM_UI_FLAG_IMMERSIVE |
+      View.SYSTEM_UI_FLAG_IMMERSIVE_STICKY;
+
+    protected ReactContext mReactContext;
+    protected View mWebView;
+
+    protected View mVideoView;
+    protected WebChromeClient.CustomViewCallback mCustomViewCallback;
+
+    public RNCWebChromeClient(ReactContext reactContext, WebView webView) {
+      this.mReactContext = reactContext;
+      this.mWebView = webView;
     }
-    String[] mimeTypes = new String[types.length];
-    for (int i = 0; i < types.length; i++) {
-      String t = types[i];
-      // convert file extensions to mime types
-      if (t.matches("\\.\\w+")) {
-        String mimeType = getMimeTypeFromExtension(t.replace(".", ""));
-        mimeTypes[i] = mimeType;
+
+    @Override
+    public boolean onConsoleMessage(ConsoleMessage message) {
+      if (ReactBuildConfig.DEBUG) {
+        return super.onConsoleMessage(message);
+      }
+      // Ignore console logs in non debug builds.
+      return true;
+    }
+
+    // Fix WebRTC permission request error.
+    @Override
+    public void onPermissionRequest(final PermissionRequest request) {
+      String[] requestedResources = request.getResources();
+      ArrayList<String> permissions = new ArrayList<>();
+      ArrayList<String> grantedPermissions = new ArrayList<String>();
+      for (int i = 0; i < requestedResources.length; i++) {
+        if (requestedResources[i].equals(PermissionRequest.RESOURCE_AUDIO_CAPTURE)) {
+          permissions.add(Manifest.permission.RECORD_AUDIO);
+        } else if (requestedResources[i].equals(PermissionRequest.RESOURCE_VIDEO_CAPTURE)) {
+          permissions.add(Manifest.permission.CAMERA);
+        }
+        // TODO: RESOURCE_MIDI_SYSEX, RESOURCE_PROTECTED_MEDIA_ID.
+      }
+
+      for (int i = 0; i < permissions.size(); i++) {
+        if (ContextCompat.checkSelfPermission(mReactContext, permissions.get(i)) != PackageManager.PERMISSION_GRANTED) {
+          continue;
+        }
+        if (permissions.get(i).equals(Manifest.permission.RECORD_AUDIO)) {
+          grantedPermissions.add(PermissionRequest.RESOURCE_AUDIO_CAPTURE);
+        } else if (permissions.get(i).equals(Manifest.permission.CAMERA)) {
+          grantedPermissions.add(PermissionRequest.RESOURCE_VIDEO_CAPTURE);
+        }
+      }
+
+      if (grantedPermissions.isEmpty()) {
+        request.deny();
       } else {
-        mimeTypes[i] = t;
+        String[] grantedPermissionsArray = new String[grantedPermissions.size()];
+        grantedPermissionsArray = grantedPermissions.toArray(grantedPermissionsArray);
+        request.grant(grantedPermissionsArray);
       }
     }
-    return mimeTypes;
+
+    @Override
+    public void onProgressChanged(WebView webView, int newProgress) {
+      super.onProgressChanged(webView, newProgress);
+
+      if(newProgress >= 10){
+        ((RNCWebView) webView).setMessagingEnabled(true);
+      }
+
+      WritableMap event = Arguments.createMap();
+      event.putDouble("target", webView.getId());
+      event.putString("title", webView.getTitle());
+      event.putBoolean("canGoBack", webView.canGoBack());
+      event.putBoolean("canGoForward", webView.canGoForward());
+      event.putDouble("progress", (float) newProgress / 100);
+      dispatchEvent(
+        webView,
+        new TopLoadingProgressEvent(
+          webView.getId(),
+          event));
+
+    }
+
+    @Override
+    public void onGeolocationPermissionsShowPrompt(String origin, GeolocationPermissions.Callback callback) {
+      callback.invoke(origin, true, false);
+    }
+
+    protected void openFileChooser(ValueCallback<Uri> filePathCallback, String acceptType) {
+      getModule(mReactContext).startPhotoPickerIntent(filePathCallback, acceptType);
+    }
+
+    protected void openFileChooser(ValueCallback<Uri> filePathCallback) {
+      getModule(mReactContext).startPhotoPickerIntent(filePathCallback, "");
+    }
+
+    protected void openFileChooser(ValueCallback<Uri> filePathCallback, String acceptType, String capture) {
+      getModule(mReactContext).startPhotoPickerIntent(filePathCallback, acceptType);
+    }
+
+    @TargetApi(Build.VERSION_CODES.LOLLIPOP)
+    @Override
+    public boolean onShowFileChooser(WebView webView, ValueCallback<Uri[]> filePathCallback, FileChooserParams fileChooserParams) {
+      String[] acceptTypes = fileChooserParams.getAcceptTypes();
+      boolean allowMultiple = fileChooserParams.getMode() == WebChromeClient.FileChooserParams.MODE_OPEN_MULTIPLE;
+      Intent intent = fileChooserParams.createIntent();
+      return getModule(mReactContext).startPhotoPickerIntent(filePathCallback, intent, acceptTypes, allowMultiple);
+    }
+
+    @Override
+    public void onHostResume() {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT && mVideoView != null && mVideoView.getSystemUiVisibility() != FULLSCREEN_SYSTEM_UI_VISIBILITY) {
+        mVideoView.setSystemUiVisibility(FULLSCREEN_SYSTEM_UI_VISIBILITY);
+      }
+    }
+
+    @Override
+    public void onHostPause() { }
+
+    @Override
+    public void onHostDestroy() { }
+
+    protected ViewGroup getRootView() {
+      return (ViewGroup) mReactContext.getCurrentActivity().findViewById(android.R.id.content);
+    }
   }
 
-  private String getMimeTypeFromExtension(String extension) {
-    String type = null;
-    if (extension != null) {
-      type = MimeTypeMap.getSingleton().getMimeTypeFromExtension(extension);
-    }
-    return type;
-  }
+  /**
+   * Subclass of {@link WebView} that implements {@link LifecycleEventListener} interface in order
+   * to call {@link WebView#destroy} on activity destroy event and also to clear the client
+   */
+  protected static class RNCWebView extends WebView implements LifecycleEventListener {
+    protected @Nullable
+    String injectedJS;
+    protected boolean messagingEnabled = false;
+    protected @Nullable
+    RNCWebViewClient mRNCWebViewClient;
+    protected boolean sendContentSizeChangeEvents = false;
+    private OnScrollDispatchHelper mOnScrollDispatchHelper;
+    protected boolean hasScrollEvent = false;
 
-  private Uri getOutputUri(String intentType) {
-    File capturedFile = null;
-    try {
-      capturedFile = getCapturedFile(intentType);
-    } catch (IOException e) {
-      Log.e("CREATE FILE", "Error occurred while creating the File", e);
-      e.printStackTrace();
-    }
-
-    // for versions below 6.0 (23) we use the old File creation & permissions model
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-      return Uri.fromFile(capturedFile);
-    }
-
-    // for versions 6.0+ (23) we use the FileProvider to avoid runtime permissions
-    String packageName = getReactApplicationContext().getPackageName();
-    return FileProvider.getUriForFile(getReactApplicationContext(), packageName + ".fileprovider", capturedFile);
-  }
-
-  private File getCapturedFile(String intentType) throws IOException {
-    String prefix = "";
-    String suffix = "";
-    String dir = "";
-    String filename = "";
-
-    if (intentType.equals(MediaStore.ACTION_IMAGE_CAPTURE)) {
-      prefix = "image-";
-      suffix = ".jpg";
-      dir = Environment.DIRECTORY_PICTURES;
-    } else if (intentType.equals(MediaStore.ACTION_VIDEO_CAPTURE)) {
-      prefix = "video-";
-      suffix = ".mp4";
-      dir = Environment.DIRECTORY_MOVIES;
+    /**
+     * WebView must be created with an context of the current activity
+     * <p>
+     * Activity Context is required for creation of dialogs internally by WebView
+     * Reactive Native needed for access to ReactNative internal system functionality
+     */
+    public RNCWebView(ThemedReactContext reactContext) {
+      super(reactContext);
     }
 
-    filename = prefix + String.valueOf(System.currentTimeMillis()) + suffix;
-
-    // for versions below 6.0 (23) we use the old File creation & permissions model
-    if (Build.VERSION.SDK_INT < Build.VERSION_CODES.M) {
-      // only this Directory works on all tested Android versions
-      // ctx.getExternalFilesDir(dir) was failing on Android 5.0 (sdk 21)
-      File storageDir = Environment.getExternalStoragePublicDirectory(dir);
-      return new File(storageDir, filename);
+    public void setSendContentSizeChangeEvents(boolean sendContentSizeChangeEvents) {
+      this.sendContentSizeChangeEvents = sendContentSizeChangeEvents;
     }
 
-    File storageDir = getReactApplicationContext().getExternalFilesDir(null);
-    return File.createTempFile(filename, suffix, storageDir);
-  }
-
-  private Boolean isArrayEmpty(String[] arr) {
-    // when our array returned from getAcceptTypes() has no values set from the webview
-    // i.e. <input type="file" />, without any "accept" attr
-    // will be an array with one empty string element, afaik
-    return arr.length == 0 || (arr.length == 1 && arr[0].length() == 0);
-  }
-
-  private PermissionAwareActivity getPermissionAwareActivity() {
-    Activity activity = getCurrentActivity();
-    if (activity == null) {
-      throw new IllegalStateException("Tried to use permissions API while not attached to an Activity.");
-    } else if (!(activity instanceof PermissionAwareActivity)) {
-      throw new IllegalStateException("Tried to use permissions API but the host Activity doesn't implement PermissionAwareActivity.");
+    public void setHasScrollEvent(boolean hasScrollEvent) {
+      this.hasScrollEvent = hasScrollEvent;
     }
-    return (PermissionAwareActivity) activity;
+
+    @Override
+    public void onHostResume() {
+      // do nothing
+    }
+
+    @Override
+    public void onHostPause() {
+      // do nothing
+    }
+
+    @Override
+    public void onHostDestroy() {
+      cleanupCallbacksAndDestroy();
+    }
+
+    @Override
+    protected void onSizeChanged(int w, int h, int ow, int oh) {
+      super.onSizeChanged(w, h, ow, oh);
+
+      if (sendContentSizeChangeEvents) {
+        dispatchEvent(
+          this,
+          new ContentSizeChangeEvent(
+            this.getId(),
+            w,
+            h
+          )
+        );
+      }
+    }
+
+    @Override
+    public void setWebViewClient(WebViewClient client) {
+      super.setWebViewClient(client);
+      mRNCWebViewClient = (RNCWebViewClient) client;
+    }
+
+    public @Nullable
+    RNCWebViewClient getRNCWebViewClient() {
+      return mRNCWebViewClient;
+    }
+
+    public void setInjectedJavaScript(@Nullable String js) {
+      injectedJS = js;
+    }
+
+    protected RNCWebViewBridge createRNCWebViewBridge(RNCWebView webView) {
+      return new RNCWebViewBridge(webView);
+    }
+
+    @SuppressLint("AddJavascriptInterface")
+    public void setMessagingEnabled(boolean enabled) {
+      if (messagingEnabled == enabled) {
+        return;
+      }
+
+      messagingEnabled = enabled;
+
+      if (enabled) {
+        addJavascriptInterface(createRNCWebViewBridge(this), JAVASCRIPT_INTERFACE);
+      } else {
+        removeJavascriptInterface(JAVASCRIPT_INTERFACE);
+      }
+    }
+
+    protected void evaluateJavascriptWithFallback(String script) {
+      if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.KITKAT) {
+        evaluateJavascript(script, null);
+        return;
+      }
+
+      try {
+        loadUrl("javascript:" + URLEncoder.encode(script, "UTF-8"));
+      } catch (UnsupportedEncodingException e) {
+        // UTF-8 should always be supported
+        throw new RuntimeException(e);
+      }
+    }
+
+    public void callInjectedJavaScript() {
+      if (getSettings().getJavaScriptEnabled() &&
+        injectedJS != null &&
+        !TextUtils.isEmpty(injectedJS)) {
+        evaluateJavascriptWithFallback("(function() {\n" + injectedJS + ";\n})();");
+      }
+    }
+
+    public void onMessage(String message) {
+      if (mRNCWebViewClient != null) {
+        WebView webView = this;
+        webView.post(new Runnable() {
+          @Override
+          public void run() {
+            if (mRNCWebViewClient == null) {
+              return;
+            }
+            WritableMap data = mRNCWebViewClient.createWebViewEvent(webView, webView.getUrl());
+            data.putString("data", message);
+            dispatchEvent(webView, new TopMessageEvent(webView.getId(), data));
+          }
+        });
+      } else {
+        WritableMap eventData = Arguments.createMap();
+        eventData.putString("data", message);
+        dispatchEvent(this, new TopMessageEvent(this.getId(), eventData));
+      }
+    }
+
+    protected void onScrollChanged(int x, int y, int oldX, int oldY) {
+      super.onScrollChanged(x, y, oldX, oldY);
+
+      if (!hasScrollEvent) {
+        return;
+      }
+
+      if (mOnScrollDispatchHelper == null) {
+        mOnScrollDispatchHelper = new OnScrollDispatchHelper();
+      }
+
+      if (mOnScrollDispatchHelper.onScrollChanged(x, y)) {
+        ScrollEvent event = ScrollEvent.obtain(
+          this.getId(),
+          ScrollEventType.SCROLL,
+          x,
+          y,
+          mOnScrollDispatchHelper.getXFlingVelocity(),
+          mOnScrollDispatchHelper.getYFlingVelocity(),
+          this.computeHorizontalScrollRange(),
+          this.computeVerticalScrollRange(),
+          this.getWidth(),
+          this.getHeight());
+
+        dispatchEvent(this, event);
+      }
+    }
+
+    protected void cleanupCallbacksAndDestroy() {
+        ((ViewGroup) this.getParent()).removeView(this);
+        this.removeAllViews();
+        setWebViewClient(null);
+        destroy();
+    }
+
+    protected class RNCWebViewBridge {
+      RNCWebView mContext;
+
+      RNCWebViewBridge(RNCWebView c) {
+        mContext = c;
+      }
+
+      /**
+       * This method is called whenever JavaScript running within the web view calls:
+       * - window[JAVASCRIPT_INTERFACE].postMessage
+       */
+      @JavascriptInterface
+      public void postMessage(String message) {
+        mContext.onMessage(message);
+      }
+    }
   }
 }
