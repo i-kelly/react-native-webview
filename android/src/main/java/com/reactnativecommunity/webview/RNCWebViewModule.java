@@ -215,7 +215,7 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
       Charset charset = contentType != null ? contentType.charset(UTF_8) : UTF_8;
       if (
         (response.code() < HttpURLConnection.HTTP_MULT_CHOICE || response.code() >= HttpURLConnection.HTTP_BAD_REQUEST) &&
-        isHtml(contentType))
+        isHtml(contentType)
       ) {
         is = new InputStreamWithInjectedJS(is, webView.injectedJS, charset, webView.getContext());
       }
