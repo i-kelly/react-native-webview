@@ -39,6 +39,7 @@ import android.webkit.WebSettings;
 import android.webkit.WebView;
 import android.webkit.WebViewClient;
 import android.widget.FrameLayout;
+import android.util.Base64;
 
 import com.facebook.react.views.scroll.ScrollEvent;
 import com.facebook.react.views.scroll.ScrollEventType;
@@ -154,7 +155,7 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
   protected @Nullable String mUserAgent = null;
   protected @Nullable String mUserAgentWithApplicationName = null;
   protected static Map<String, String> mBlacklist;
-
+  private boolean scriptWasInjected = false;
 
 
   public RNCWebViewManager() {
@@ -243,6 +244,10 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
 
   @RequiresApi(api = Build.VERSION_CODES.LOLLIPOP)
   public WebResourceResponse shouldInterceptRequest(WebResourceRequest request, Boolean onlyMainFrame, RNCWebView webView) {
+    if (request == null) {
+      return null;
+    }
+
     Uri url = request.getUrl();
     String urlStr = url.toString();
 
@@ -259,6 +264,19 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
     }
 
     if(!URLUtil.isValidUrl(urlStr)){
+      return null;
+    }
+
+    if (!request.getMethod().equalsIgnoreCase("GET") || !request.isForMainFrame()) {
+      if (request.getMethod().equalsIgnoreCase("GET")
+        && (request.getUrl().toString().contains(".js")
+        || request.getUrl().toString().contains("json")
+        || request.getUrl().toString().contains("css"))) {
+        if (!scriptWasInjected) {
+          injectScriptFile(webView);
+          scriptWasInjected = true;
+        }
+      }
       return null;
     }
 
@@ -287,7 +305,16 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
       MediaType contentType = response.body().contentType();
       Charset charset = contentType != null ? contentType.charset(UTF_8) : UTF_8;
       if (response.code() < HttpURLConnection.HTTP_MULT_CHOICE || response.code() >= HttpURLConnection.HTTP_BAD_REQUEST) {
-        is = new InputStreamWithInjectedJS(is, webView.injectedJS, charset, webView.getContext());
+        is = new InputStreamWithInjectedJS(is,
+          webView.injectedJS,
+          charset,
+          webView.getContext(),
+          new OnInjectedListener() {
+            @Override
+            public void onInject(boolean injected) {
+              scriptWasInjected = injected;
+            }
+          });
       }
 
       return new WebResourceResponse(MIME_TEXT_HTML, charset.name(), is);
@@ -297,6 +324,20 @@ public class RNCWebViewManager extends SimpleViewManager<WebView> {
     }
   }
 
+  private void injectScriptFile(RNCWebView view) {
+    String js = view.injectedJS;
+    byte[] buffer = js.getBytes();
+    String encoded = Base64.encodeToString(buffer, Base64.NO_WRAP);
+
+    view.post(() -> view.loadUrl("javascript:(function() {" +
+      "var parent = document.getElementsByTagName('head').item(0);" +
+      "var script = document.createElement('script');" +
+      "script.type = 'text/javascript';" +
+      // Tell the browser to BASE64-decode the string into your script !!!
+      "script.innerHTML = window.atob('" + encoded + "');" +
+      "parent.appendChild(script)" +
+      "})()"));
+  }
 
   protected RNCWebView createRNCWebViewInstance(ThemedReactContext reactContext) {
     return new RNCWebView(reactContext);

@@ -26,6 +26,7 @@ public class InputStreamWithInjectedJS extends InputStream {
   private boolean scriptWasInjected = false;
   private boolean openingHeadFound = false;
   private StringBuffer contentBuffer = new StringBuffer();
+  private OnInjectedListener injectListener;
   private static Charset getCharset(String charsetName) {
     Charset cs = UTF_8;
     try {
@@ -46,7 +47,7 @@ public class InputStreamWithInjectedJS extends InputStream {
     }
     return new ByteArrayInputStream(js.getBytes(charset));
   }
-  InputStreamWithInjectedJS(InputStream is, String js, Charset charset, Context c) {
+  InputStreamWithInjectedJS(InputStream is, String js, Charset charset, Context c, OnInjectedListener listener) {
     if (js == null) {
       this.pageIS = is;
     } else {
@@ -57,6 +58,7 @@ public class InputStreamWithInjectedJS extends InputStream {
       script.put(cs, jsScript);
       this.pageIS = is;
     }
+    this.injectListener = listener;
   }
   @Override
   public int read() throws IOException {
@@ -69,6 +71,9 @@ public class InputStreamWithInjectedJS extends InputStream {
       if (nextByte == -1) {
         scriptIS.close();
         scriptWasInjected = true;
+        if(injectListener!=null){
+          injectListener.onInject(true);
+        }
         return pageIS.read();
       } else {
         return nextByte;
